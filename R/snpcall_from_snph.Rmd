@@ -1,0 +1,295 @@
+---
+title: "snpcall_from_snph"
+author: "Thomas Karaouzene"
+date: "23 novembre 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(warning = FALSE,include = FALSE,echo = FALSE,cache= TRUE)
+
+```
+
+
+```{r lib}
+
+require(foreach)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(plotly)
+library(scales)
+source("snpcall_from_snph.R")
+
+```
+
+```{r param}
+
+cov_rat_low <- .2
+cov_rat_high <- .8
+
+min_cov <- 10
+max_homo_r <- .2
+low_grey <- .3
+min_het <- .4
+max_het <- .75
+high_grey <- .8
+min_homo_v <- .85
+
+```
+
+```{r data}
+
+runs_file <- "../../data/All_runs_2016.csv"
+df_runs <- fread(runs_file, data.table = FALSE, header = TRUE) %>%
+  select(Magic_ID,Patient,Pathologie,Project,Date) %>%
+  mutate(Project = paste0(Project,"_",Date)) %>%
+  select(-Date)
+
+names(df_runs)[1] <- "Run"
+
+myfile <- "chr1_X_Y.rds"
+
+
+if (!file.exists(myfile)) {
+
+  snph_dirs <- list.dirs("../../out/1_Magic_project/All_Exomes_2016/tmp/SNPH/")
+  
+  x <- foreach(i = 1:length(snph_dirs), .combine='rbind') %do% {
+    
+    dir <- snph_dirs[i]
+    
+    if (grepl("zoneG.X",dir) | grepl("zoneG.Y",dir) | grepl("zoneG.1_",dir)) {
+      #    if (grepl("zoneG.1_",dir)) {
+      
+      print(paste0(dir," : ",i, "/", length(snph_dirs)))
+      
+      snph_file <- paste0(dir,"/All_Exomes_2016.snp.sorted")
+      
+      df_snph <- fread(snph_file, header = TRUE, na.strings = "-", data.table = FALSE)
+      
+      names(df_snph)[1] <- "Chrom"
+      names(df_snph)[3] <- "Var_type"
+      names(df_snph)[19] <- "Strand"
+      
+      df_snph <- df_snph %>%
+        
+        select(-Reference, -Variation, -Dose, -Amb, -Chi2, -N_rich, -`Dose+`, -`Dose-`, -`%%`) %>% 
+        
+        group_by(Run, Chrom, Position) %>%
+        
+        mutate(Tot_cov = sum(`V+`) + sum(`V-`) + sum(`R-`) + sum(`R+`)) %>%
+        
+        group_by(Run, Position, Var_type) %>%
+        
+        mutate(Cov_forward = `V+` + `R+`,
+               Cov_reverse = `V-` + `R-`,
+               Cov_rate = (Cov_forward + Cov_reverse) / Tot_cov,
+               Call_forward = strand_call(cov = Cov_forward, var = `V+`, ref = `R+`),
+               Call_reverse = strand_call(cov = Cov_reverse, var = `V-`, ref = `R-`),
+               Strand = strand(call1=Call_forward, call2=Call_reverse),
+               Call = call(call1 = Call_forward, call2 = Call_reverse, cov_rate = Cov_rate, status = Strand),
+               Chrom = as.character(Chrom)) %>%
+        inner_join(df_runs, by = "Run")
+    }
+  }
+    
+  saveRDS(x,file = myfile)
+  
+} else {
+  
+  x <- readRDS(myfile)
+}
+
+df_clean <- x %>%
+  ungroup() %>%
+  filter(Call == "HV" | Call == "HET", 
+         Cover >= 15,
+         Pathologie != "Ovo")
+
+# rm(x)
+# gc()
+
+```
+
+```{r geno}
+
+df_geno <- df_clean %>%
+  group_by(Chrom,Project) %>%
+  mutate(N = n()) %>%
+  group_by(Chrom,Project,Call) %>%
+  summarise(Prop = n() / mean(N))
+
+df_geno_strand <- df_clean %>%
+  group_by(Chrom,Project,Strand) %>%
+  mutate(N = n()) %>%
+  group_by(Chrom,Project,Strand,Call) %>%
+  summarise(Prop = n() / mean(N))
+
+mygeno <- c("Het","Homo var")
+myproject <- c("Integragen","Novogene")
+
+```
+
+##**MAGIC**
+
+on ne conserve que les patients Novogene et Integragen (les femmes sont exclues)  
+Les positions Homo ref sont exclues (et non comptabilisées dans les proportions suivantes)  
+Les positions ayant une couverture $\le$ 15 sont égallement exclues  
+
+###**Chr 1,X et Y**  
+
+####**Sans distinguer les Strands**  
+
+```{r plot1,include=TRUE,fig.width=10}
+
+p1 <- ggplot(df_geno, aes(Call,Prop)) +
+  geom_bar(position = "dodge", stat = "identity",aes(fill = Project)) + 
+  facet_wrap(~Chrom) +
+  scale_y_continuous(labels = percent) +
+  scale_x_discrete(name = NULL, labels = mygeno) +
+  scale_fill_discrete(labels = myproject)
+
+p1
+
+```
+
+####**En distinguant les Strands**  
+
+```{r plot2,include=TRUE,fig.width=10,fig.height=15}
+
+p2 <- ggplot(df_geno_strand, aes(Call,Prop)) +
+  geom_bar(position = "dodge", stat = "identity",aes(fill = Project)) + 
+  facet_wrap(~Chrom + Strand,ncol = 2) +
+  scale_y_continuous(labels = percent) +
+  scale_x_discrete(name = NULL,labels = mygeno) +
+  scale_fill_discrete(labels = myproject)
+
+p2
+
+```
+
+Même chose en tenant compte du Strand  
+DS = Double Strand  
+SS = Single Strand  
+
+##**Chr Y**  
+
+```{r plot3, include=TRUE,fig.width=10}
+
+df_clean <- x %>%
+  ungroup() %>%
+  filter(Cover >= 15,
+         Pathologie != "Ovo")
+
+
+df_geno_strand <- df_clean %>%
+  group_by(Chrom,Project,Strand) %>%
+  mutate(N = n()) %>%
+  group_by(Chrom,Project,Strand,Call) %>%
+  summarise(Prop = n() / mean(N))
+
+
+p3 <- ggplot(df_geno_strand %>% filter(Chrom == "Y", Strand != "NS"),
+             aes(Call,Prop)) +
+  geom_bar(position = "dodge", stat = "identity",aes(fill = Project)) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_discrete(labels = myproject) +
+  scale_x_discrete(name = NULL) +
+  facet_wrap(~Strand) +
+   theme(axis.text.x = element_text(angle=45))
+
+p3
+
+```
+
+On affiche ici que le chromosome Y
+On voit qu'une grande partie des appels sont PC (Partial Coverage)
+
+According to NTM notes:
+
+PC == partial coverage and not homovar, these cannot be called but we may want to flag or count them in the calling code;
+We calculate $covRat = \frac{rp + rm + vp + vm}{totalCov}$, and use
+covRatLow and $covRatHigh (hard-coded) as cutoffs to implement our strategy to deal
+with the "multiple lines for single position and run" problem:
+if covRat < covRatLow, return ("NS", "0");
+elsif covRat > covRatHigh, return whatever call was made;
+else
+  if $v was "HV" change it to "HVPC" and return;
+  else return "PC".
+Rationale is: two different lines called HVPC could be a hetero var1+var2,
+but any other mix of calls with multiple partialCov lines points to
+some problem (we have at least 3 well-represented alleles at this position).
+Note that if a line is PC but the same position gets a normal call (ie it
+is covRatHigh), the covRatHigh line is valid and should be used.
+The only problematic case is when all lines for that pos are at most partialCov.
+
+
+```{r var_type}
+# 
+# df_snp <- x %>%
+#   
+#   ungroup() %>%
+#   
+#   filter(Call != "HR", 
+#          Cover >= 15,
+#          grepl("Ins",Var_type) == FALSE,
+#          grepl("Del",Var_type) == FALSE) %>%
+#   
+#   dplyr::select(-Chrom,-Position,-(Cover:Call)) %>%
+#   
+#   mutate(Ntot = n()) %>%
+#   
+#   group_by(Var_type) %>%
+# 
+#   mutate(Var_tot = n() / Ntot) %>%
+# 
+#   group_by(Project) %>%
+#   mutate(Nproject = n()) %>%
+#   
+#   group_by(Var_type,Project) %>%
+#   mutate(Var_type_project = n() / Nproject) %>%
+# 
+#   group_by(Run) %>%
+#   mutate(Nrun = n()) %>%
+#   
+#   group_by(Var_type,Run) %>%
+#   mutate(Var_type_run = n() / Nrun) %>%
+#   
+#   dplyr::select(Run,Var_type_run,Var_type_project,Var_tot) %>%
+#   
+#   filter(Run == run) %>%
+#   summarise(Var_type_run = mean(Var_type_run),
+#             Var_type_project = mean(Var_type_project),
+#             Var_tot = mean(Var_tot)) %>%
+# 
+#   melt(id.vars = c("Run","Var_type"),variable.name = "group",value.name = "Prop")
+# 
+# ggplotly(ggplot(df_snp,aes(Var_type,Prop,fill = group)) + 
+#   geom_bar(stat = "identity",position = position_dodge()) + 
+#   scale_fill_discrete(name = "SNPs"), labels = c(run,project,"All"))
+
+```
+
+
+```{r}
+# 
+# 
+# ggplotly(ggplot(df_snp,aes(Var_type)) + 
+#            geom_bar(aes(fill = Var_type)))
+# 
+# ggplotly(ggplot(xx,aes(Call)) + 
+#            geom_bar(aes(fill = Call)))
+# 
+# ggplotly(ggplot(xx,aes(Strand)) + 
+#          geom_bar(aes(fill = Strand)))
+# 
+# ggplot(xx,aes(Position,colour = Cover)) +
+#   geom_freqpoly(stat = "bin", bins = 200)
+# 
+# 
+# multiplot(p1,p2)
+
+```
